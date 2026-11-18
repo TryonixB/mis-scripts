@@ -1,0 +1,295 @@
+--[[
+  TIN AIM - Aimbot universal para Roblox
+  Activar/desactivar con la tecla I o con el boton de la UI.
+  La UI se puede minimizar y volver a agrandar.
+  Compatible con Xeno (Luau estandar).
+]]
+
+local Players = game:GetService("Players")
+local RS      = game:GetService("RunService")
+local UIS     = game:GetService("UserInputService")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local CFG = {
+	fovDeg    = 40,
+	smooth    = 0.35,
+	maxDist   = 350,
+	targetPart = "Head",
+}
+
+local state = {
+	enabled = false,
+	target  = nil,
+	targetName = "Ninguno",
+}
+
+local C = {
+	bg     = Color3.fromRGB(18, 18, 25),
+	top    = Color3.fromRGB(28, 28, 38),
+	panel  = Color3.fromRGB(32, 32, 44),
+	btn    = Color3.fromRGB(45, 45, 60),
+	on     = Color3.fromRGB(45, 160, 100),
+	off    = Color3.fromRGB(175, 50, 70),
+	accent = Color3.fromRGB(70, 150, 220),
+	text   = Color3.fromRGB(238, 238, 245),
+	muted  = Color3.fromRGB(150, 150, 165),
+	stroke = Color3.fromRGB(60, 60, 78),
+}
+
+local ui = {}
+
+local function mkCorner(parent, radius)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius or 8)
+	c.Parent = parent
+	return c
+end
+
+local function mkStroke(parent, color, thickness)
+	local s = Instance.new("UIStroke")
+	s.Color = color or C.stroke
+	s.Thickness = thickness or 1
+	s.Parent = parent
+	return s
+end
+
+local function mkLabel(parent, text, size, pos, textSize, color, font)
+	local l = Instance.new("TextLabel")
+	l.Size = size
+	l.Position = pos
+	l.Text = text
+	l.TextColor3 = color or C.text
+	l.BackgroundTransparency = 1
+	l.Font = font or Enum.Font.Gotham
+	l.TextSize = textSize or 14
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.Parent = parent
+	return l
+end
+
+local function mkBtn(parent, text, size, pos, color, onClick)
+	local b = Instance.new("TextButton")
+	b.Size = size
+	b.Position = pos
+	b.Text = text
+	b.TextColor3 = C.text
+	b.BackgroundColor3 = color or C.btn
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 14
+	b.BorderSizePixel = 0
+	b.Parent = parent
+	mkCorner(b, 7)
+	mkStroke(b, C.stroke, 1)
+	if onClick then b.MouseButton1Click:Connect(onClick) end
+	return b
+end
+
+--------------------------------------------------
+-- AIMBOT
+--------------------------------------------------
+local function findTarget()
+	local cam = workspace.CurrentCamera
+	if not cam then return nil end
+	local camPos = cam.CFrame.Position
+	local look = cam.CFrame.LookVector
+	local fovRad = math.rad(CFG.fovDeg)
+
+	local best, bestScore = nil, math.huge
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player and p.Character then
+			local char = p.Character
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			local part = char:FindFirstChild(CFG.targetPart)
+				or char:FindFirstChild("HumanoidRootPart")
+			if hum and hum.Health > 0 and part then
+				local delta = part.Position - camPos
+				local dist = delta.Magnitude
+				if dist > 0 and dist <= CFG.maxDist then
+					local dir = delta.Unit
+					local dot = math.clamp(look:Dot(dir), -1, 1)
+					local angle = math.acos(dot)
+					if angle <= fovRad then
+						local score = angle + (dist * 0.00001)
+						if score < bestScore then
+							bestScore = score
+							best = part
+							state.targetName = p.Name .. " (" .. math.floor(dist) .. "m)"
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function updateStatus()
+	if not ui.lblTarget then return end
+	if state.enabled then
+		ui.lblTarget.Text = "Objetivo: " .. state.targetName
+	else
+		ui.lblTarget.Text = "Objetivo: --"
+	end
+end
+
+RS.RenderStepped:Connect(function()
+	if not state.enabled then
+		state.target = nil
+		updateStatus()
+		return
+	end
+	local target = findTarget()
+	state.target = target
+	if target then
+		local cam = workspace.CurrentCamera
+		if cam then
+			local desired = CFrame.lookAt(cam.CFrame.Position, target.Position)
+			cam.CFrame = cam.CFrame:Lerp(desired, CFG.smooth)
+		end
+	end
+	updateStatus()
+end)
+
+local function setEnabled(v)
+	state.enabled = v
+	ui.btnToggle.Text = v and "AIMBOT: ON" or "AIMBOT: OFF"
+	ui.btnToggle.BackgroundColor3 = v and C.on or C.off
+	updateStatus()
+end
+
+UIS.InputBegan:Connect(function(input, gpe)
+	if gpe then return end
+	if input.KeyCode == Enum.KeyCode.I then
+		setEnabled(not state.enabled)
+	end
+end)
+
+--------------------------------------------------
+-- UI
+--------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "TinAimGui"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = playerGui
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 340, 0, 300)
+main.Position = UDim2.new(0.5, -170, 0.5, -150)
+main.BackgroundColor3 = C.bg
+main.BorderSizePixel = 0
+main.Parent = gui
+mkCorner(main, 12)
+mkStroke(main, C.stroke, 1)
+
+local top = Instance.new("Frame")
+top.Size = UDim2.new(1, 0, 0, 38)
+top.BackgroundColor3 = C.top
+top.Parent = main
+mkCorner(top, 12)
+
+mkLabel(top, "TIN AIM", UDim2.new(0, 140, 0, 26), UDim2.new(0, 14, 0, 6), 16, C.text, Enum.Font.GothamBold)
+
+local minBtn = mkBtn(top, "-", UDim2.new(0, 30, 0, 26), UDim2.new(1, -72, 0, 6), C.btn, nil)
+minBtn.TextSize = 18
+
+local maxBtn = mkBtn(top, "+", UDim2.new(0, 30, 0, 26), UDim2.new(1, -38, 0, 6), C.btn, nil)
+maxBtn.TextSize = 18
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, 0, 1, -38)
+content.Position = UDim2.new(0, 0, 0, 38)
+content.BackgroundTransparency = 1
+content.Parent = main
+
+ui.btnToggle = mkBtn(content, "AIMBOT: OFF", UDim2.new(0, 300, 0, 46), UDim2.new(0, 20, 0, 16), C.off, function()
+	setEnabled(not state.enabled)
+end)
+
+ui.lblTarget = mkLabel(content, "Objetivo: --", UDim2.new(0, 300, 0, 24), UDim2.new(0, 20, 0, 76), 14, C.accent, Enum.Font.GothamBold)
+
+mkLabel(content, " tecla I: alternar aimbot", UDim2.new(0, 300, 0, 22), UDim2.new(0, 20, 0, 102), 12, C.muted)
+
+-- FOV
+local fovLbl = mkLabel(content, "FOV: " .. CFG.fovDeg .. "°", UDim2.new(0, 200, 0, 24), UDim2.new(0, 20, 0, 134), 14, C.text)
+mkBtn(content, "-", UDim2.new(0, 36, 0, 26), UDim2.new(0, 20, 0, 160), C.btn, function()
+	CFG.fovDeg = math.max(5, CFG.fovDeg - 5)
+	fovLbl.Text = "FOV: " .. CFG.fovDeg .. "°"
+end)
+mkBtn(content, "+", UDim2.new(0, 36, 0, 26), UDim2.new(0, 62, 0, 160), C.btn, function()
+	CFG.fovDeg = math.min(180, CFG.fovDeg + 5)
+	fovLbl.Text = "FOV: " .. CFG.fovDeg .. "°"
+end)
+
+-- Suavizado
+local smoothLbl = mkLabel(content, "Suavizado: " .. CFG.smooth, UDim2.new(0, 200, 0, 24), UDim2.new(0, 180, 0, 134), 14, C.text)
+mkBtn(content, "-", UDim2.new(0, 36, 0, 26), UDim2.new(0, 180, 0, 160), C.btn, function()
+	CFG.smooth = math.max(0.05, CFG.smooth - 0.05)
+	smoothLbl.Text = "Suavizado: " .. math.floor(CFG.smooth * 100) / 100
+end)
+mkBtn(content, "+", UDim2.new(0, 36, 0, 26), UDim2.new(0, 222, 0, 160), C.btn, function()
+	CFG.smooth = math.min(1, CFG.smooth + 0.05)
+	smoothLbl.Text = "Suavizado: " .. math.floor(CFG.smooth * 100) / 100
+end)
+
+-- Parte del objetivo
+local partBtn = mkBtn(content, "PARTE: " .. CFG.targetPart, UDim2.new(0, 300, 0, 34), UDim2.new(0, 20, 0, 202), C.accent, function()
+	CFG.targetPart = (CFG.targetPart == "Head") and "HumanoidRootPart" or "Head"
+	partBtn.Text = "PARTE: " .. CFG.targetPart
+end)
+
+mkLabel(content, "Apunta con la camara al objetivo dentro del FOV.", UDim2.new(0, 300, 0, 24), UDim2.new(0, 20, 0, 248), 12, C.muted)
+
+--------------------------------------------------
+-- MINIMIZAR / AGRANDAR
+--------------------------------------------------
+local FULL_SIZE  = UDim2.new(0, 340, 0, 300)
+local MIN_SIZE   = UDim2.new(0, 340, 0, 38)
+local FULL_POS   = UDim2.new(0.5, -170, 0.5, -150)
+local MIN_POS    = UDim2.new(0.5, -170, 0.5, -19)
+
+local function setMinimized(v)
+	main.Size = v and MIN_SIZE or FULL_SIZE
+	main.Position = v and MIN_POS or FULL_POS
+	content.Visible = not v
+	minBtn.Visible = not v
+	maxBtn.Visible = v
+end
+
+minBtn.MouseButton1Click:Connect(function()
+	setMinimized(true)
+end)
+maxBtn.MouseButton1Click:Connect(function()
+	setMinimized(false)
+end)
+maxBtn.Visible = false
+
+-- Arrastrar desde la barra superior
+local dragging, dragStart, startPos
+top.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true
+		dragStart = input.Position
+		startPos = main.Position
+	end
+end)
+UIS.InputChanged:Connect(function(input)
+	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		local d = input.Position - dragStart
+		local newPos = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + d.X,
+			startPos.Y.Scale, startPos.Y.Offset + d.Y
+		)
+		main.Position = newPos
+	end
+end)
+UIS.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = false
+	end
+end)
+
+setEnabled(false)
+print("TIN AIM cargado. Tecla I para alternar.")
