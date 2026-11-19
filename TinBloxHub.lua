@@ -21,8 +21,12 @@ local Config = {
 	Aimbot       = false,
 	ShowFOV      = true,
 	FOV          = 140,
+	Range        = 200,
 	AutoM1       = false,
 	AttackSpeed  = 12,
+	UseMouse     = true,
+	AttackTouch  = true,
+	FireRemote   = true,
 	WalkEnabled  = false,
 	WalkSpeed    = 16,
 	JumpPower    = 60,
@@ -302,25 +306,36 @@ end
 Players.PlayerRemoving:Connect(function(p) clearESP(p) end)
 
 --------------------------------------------------
--- AIMBOT (solo jugadores, solo dentro del circulo FOV)
+-- AIMBOT (solo jugadores, dentro del circulo FOV y del rango)
 --------------------------------------------------
-local function getTargetInFOV()
+-- Funciones que exponen los executors (Xeno, Synapse, etc.)
+local mousemoverel     = mousemoverel or mousemove or nil
+local mousemoveabs     = mousemoveabs or nil
+local mouse1click      = mouse1click or nil
+local firetouchinterest = firetouchinterest or nil
+
+local function getTarget()
 	local cam = workspace.CurrentCamera
 	if not cam then return nil end
 	local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-	local best, bestDist = nil, math.huge
+	local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+	local best, bestScore = nil, math.huge
 
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p ~= player and p.Character then
 			local hum = p.Character:FindFirstChildOfClass("Humanoid")
 			local root = p.Character:FindFirstChild("HumanoidRootPart")
 			if hum and root and hum.Health > 0 then
-				local sp, onScreen = cam:WorldToScreenPoint(root.Position)
-				if onScreen and sp.Z > 0 then
-					local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-					if d <= Config.FOV and d < bestDist then
-						bestDist = d
-						best = { player = p, root = root, hum = hum }
+				local dist = myRoot and (root.Position - myRoot.Position).Magnitude or 0
+				if dist <= Config.Range then
+					local sp, onScreen = cam:WorldToScreenPoint(root.Position)
+					if onScreen and sp.Z > 0 then
+						local screen = Vector2.new(sp.X, sp.Y)
+						local d = (screen - center).Magnitude
+						if d <= Config.FOV and d < bestScore then
+							bestScore = d
+							best = { player = p, root = root, hum = hum, screen = screen }
+						end
 					end
 				end
 			end
@@ -330,23 +345,41 @@ local function getTargetInFOV()
 end
 
 RS.RenderStepped:Connect(function()
-	currentTarget = Config.Aimbot and getTargetInFOV() or nil
+	if not Config.Aimbot then
+		currentTarget = nil
+		return
+	end
+	currentTarget = getTarget()
 	if not currentTarget then return end
 
-	local myChar = player.Character
-	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
 	local cam = workspace.CurrentCamera
 	local tp = currentTarget.root.Position
+	local myChar = player.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
 
-	-- El personaje mira al objetivo (asi las habilidades salen hacia el)
+	-- 1) Mover el mouse real: Blox Fruits rota la camara con el mouse
+	if Config.UseMouse and cam and currentTarget.screen then
+		pcall(function()
+			if mousemoveabs then
+				mousemoveabs(currentTarget.screen.X, currentTarget.screen.Y)
+			elseif mousemoverel then
+				local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+				local delta = currentTarget.screen - center
+				mousemoverel(delta.X, delta.Y)
+			end
+		end)
+	end
+
+	-- 2) Rotar el personaje hacia el torso (para que las habilidades salgan hacia el)
 	if myRoot then
 		local flat = Vector3.new(tp.X, myRoot.Position.Y, tp.Z)
 		pcall(function()
 			myRoot.CFrame = CFrame.lookAt(myRoot.Position, flat)
 		end)
 	end
-	-- La camara tambien apunta al torso del objetivo
-	if cam then
+
+	-- 3) Fallback: forzar la camara solo si no hay mouse disponible
+	if (not Config.UseMouse or (not mousemoveabs and not mousemoverel)) and cam then
 		pcall(function()
 			cam.CFrame = CFrame.lookAt(cam.CFrame.Position, tp)
 		end)
@@ -372,12 +405,46 @@ local function refreshFOV()
 end
 
 --------------------------------------------------
--- M1 / MOVIMIENTO
+-- M1 / ATAQUE (multi-metodo para asegurar el golpe)
 --------------------------------------------------
+local function fireCombatRemote()
+	if not Config.FireRemote or not currentTarget then return end
+	local RSvc = game:GetService("ReplicatedStorage")
+	for _, obj in ipairs(RSvc:GetDescendants()) do
+		if obj:IsA("RemoteEvent") then
+			local n = obj.Name:lower()
+			if n:find("combat") or n:find("attack") or n:find("melee") or n:find("m1") then
+				pcall(function() obj:FireServer(currentTarget.root) end)
+			end
+		end
+	end
+end
+
 local function m1Click()
 	local cam = workspace.CurrentCamera
 	local cx = cam and cam.ViewportSize.X / 2 or 500
 	local cy = cam and cam.ViewportSize.Y / 2 or 300
+
+	-- 1) mouse1click: dispara el input real del juego
+	if mouse1click then
+		pcall(mouse1click)
+	end
+
+	-- 2) firetouchinterest: simula el contacto fisico del golpe
+	if Config.AttackTouch and firetouchinterest and currentTarget then
+		pcall(function()
+			local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			if myRoot then
+				firetouchinterest(myRoot, currentTarget.root, 0)
+				firetouchinterest(myRoot, currentTarget.root, 1)
+			end
+		end)
+	end
+
+	-- 3) Remotos de combate de Blox Fruits
+	fireCombatRemote()
+
+	-- 4) VIM como ultimo recurso
 	pcall(function()
 		VIM:SendMouseButtonEvent(cx, cy, 0, true, game, false)
 		VIM:SendMouseButtonEvent(cx, cy, 0, false, game, false)
@@ -387,7 +454,7 @@ end
 task.spawn(function()
 	while true do
 		task.wait(math.max(0.02, 1 / math.max(1, Config.AttackSpeed)))
-		if Config.AutoM1 and currentTarget then
+		if Config.AutoM1 then
 			m1Click()
 		end
 	end
@@ -598,7 +665,7 @@ for i, name in ipairs(tabNames) do
 	f.BackgroundColor3 = COLORS.panel
 	f.BackgroundTransparency = 0.25
 	f.BorderSizePixel = 0
-	f.CanvasSize = UDim2.new(0, 0, 0, 470)
+	f.CanvasSize = UDim2.new(0, 0, 0, 620)
 	f.ScrollBarThickness = 6
 	f.ScrollBarImageColor3 = COLORS.green2
 	f.Visible = (i == 1)
@@ -639,12 +706,16 @@ end
 local t1 = tabFrames[1]
 addToggle(t1, "AIMBOT", UDim2.new(0, 14, 0, 14), "Aimbot")
 addToggle(t1, "CIRCULO FOV", UDim2.new(0, 14, 0, 58), "ShowFOV")
-addToggle(t1, "AUTO M1", UDim2.new(0, 14, 0, 102), "AutoM1")
-addSlider(t1, "FOV (pixeles)", UDim2.new(0, 14, 0, 150), 40, 400, Config.FOV, 5, "FOV")
-addSlider(t1, "GOLPES/SEG M1", UDim2.new(0, 14, 0, 218), 2, 50, Config.AttackSpeed, 1, "AttackSpeed")
-mkLabel(t1, "Solo jugadores. NPCs ignorados. El objetivo se sigue", UDim2.new(0, 400, 0, 40), UDim2.new(0, 14, 0, 300), 12, COLORS.muted)
-mkLabel(t1, "dentro del circulo; si sale, se suelta.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 324), 12, COLORS.muted)
-mkLabel(t1, "Cuerpo/Torso, sin necesidad de la cabeza.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 350), 12, COLORS.muted)
+addToggle(t1, "MOUSE REAL", UDim2.new(0, 14, 0, 102), "UseMouse")
+addToggle(t1, "AUTO M1", UDim2.new(0, 14, 0, 146), "AutoM1")
+addToggle(t1, "GOLPE TOUCH", UDim2.new(0, 14, 0, 190), "AttackTouch")
+addToggle(t1, "REMOTO COMBAT", UDim2.new(0, 14, 0, 234), "FireRemote")
+addSlider(t1, "FOV (pixeles)", UDim2.new(0, 14, 0, 282), 40, 400, Config.FOV, 5, "FOV")
+addSlider(t1, "RANGO (studs)", UDim2.new(0, 14, 0, 350), 20, 500, Config.Range, 10, "Range")
+addSlider(t1, "GOLPES/SEG M1", UDim2.new(0, 14, 0, 418), 2, 50, Config.AttackSpeed, 1, "AttackSpeed")
+mkLabel(t1, "Solo jugadores. NPCs ignorados. Apunta al torso", UDim2.new(0, 400, 0, 40), UDim2.new(0, 14, 0, 500), 12, COLORS.muted)
+mkLabel(t1, "dentro del circulo y del rango.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 524), 12, COLORS.muted)
+mkLabel(t1, "Si el aimbot no mueve la camara, prueba MOUSE REAL OFF.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 550), 12, COLORS.muted)
 
 --------------------------------------------------
 -- TAB 2: MOVIMIENTO
@@ -729,7 +800,7 @@ local t5 = tabFrames[5]
 mkBtn(t5, "GUARDAR CONFIG", UDim2.new(0, 400, 0, 48), UDim2.new(0, 14, 0, 18), COLORS.green2, saveConfig)
 mkBtn(t5, "CARGAR CONFIG", UDim2.new(0, 400, 0, 48), UDim2.new(0, 14, 0, 80), COLORS.btn, loadConfig)
 mkBtn(t5, "VALORES POR DEFECTO", UDim2.new(0, 400, 0, 48), UDim2.new(0, 14, 0, 142), COLORS.btn, function()
-	Config.FOV = 140; Config.AttackSpeed = 12; Config.WalkSpeed = 16
+	Config.FOV = 140; Config.Range = 200; Config.AttackSpeed = 12; Config.WalkSpeed = 16
 	Config.JumpPower = 60; Config.JumpInterval = 1.0; Config.ESPSize = 14
 	for _, s in pairs(sliders) do s:Set(Config[s.Key]) end
 	for _, tg in ipairs(ui.toggles) do tg:Refresh() end
