@@ -10,6 +10,7 @@ local RS           = game:GetService("RunService")
 local UIS          = game:GetService("UserInputService")
 local VIM          = game:GetService("VirtualInputManager")
 local HRS          = game:GetService("HttpService")
+local Workspace    = game:GetService("Workspace")
 
 local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -18,6 +19,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 -- CONFIGURACION (guardable desde MISC)
 --------------------------------------------------
 local Config = {
+	-- Main / Aimbot
 	Aimbot       = false,
 	ShowFOV      = true,
 	FOV          = 140,
@@ -27,15 +29,20 @@ local Config = {
 	UseMouse     = true,
 	AttackTouch  = true,
 	FireRemote   = true,
+	-- Movimiento
 	WalkEnabled  = false,
 	WalkSpeed    = 16,
 	JumpPower    = 60,
 	AutoJump     = false,
 	JumpInterval = 1.0,
-	ESPNames     = false,
-	ESPHealth    = false,
-	ESPPvP       = false,
-	ESPSize      = 14,
+	-- ESP
+	ESPPlayer    = false,
+	ESPName      = false,
+	ESPDistance  = false,
+	ESPBox       = false,
+	ESPTracer    = false,
+	TeamCheck    = true,
+	-- Macro
 	MacroLoop    = true,
 }
 
@@ -100,6 +107,7 @@ local function mkBtn(parent, text, size, pos, color, onClick)
 	b.Font = Enum.Font.GothamBold
 	b.TextSize = 14
 	b.BorderSizePixel = 0
+	b.AutoButtonColor = true
 	b.Parent = parent
 	mkCorner(b, 8)
 	mkStroke(b, COLORS.stroke, 1)
@@ -108,19 +116,26 @@ local function mkBtn(parent, text, size, pos, color, onClick)
 end
 
 local function mkToggle(parent, text, size, pos, value, onChange)
-	local b = mkBtn(parent, text .. ": " .. (value and "ON" or "OFF"), size, pos, value and COLORS.green2 or COLORS.red, nil)
-	b.MouseButton1Click:Connect(function()
-		value = not value
+	local b = mkBtn(parent, "", size, pos, value and COLORS.green2 or COLORS.red, nil)
+	local function refresh()
 		b.Text = text .. ": " .. (value and "ON" or "OFF")
 		b.BackgroundColor3 = value and COLORS.green2 or COLORS.red
+	end
+	refresh()
+	b.MouseButton1Click:Connect(function()
+		value = not value
+		refresh()
 		onChange(value)
 	end)
-	return b
+	return b, function(v)
+		value = v and true or false
+		refresh()
+	end
 end
 
 -- Slider tipo barra de volumen
 local function mkSlider(parent, name, min, max, value, step, onChange)
-	local W = 400
+	local W = 390
 	local holder = Instance.new("Frame")
 	holder.Size = UDim2.new(0, W, 0, 58)
 	holder.BackgroundTransparency = 1
@@ -149,33 +164,35 @@ local function mkSlider(parent, name, min, max, value, step, onChange)
 	knob.BackgroundColor3 = COLORS.text
 	knob.Text = ""
 	knob.BorderSizePixel = 0
+	knob.AutoButtonColor = false
 	knob.Parent = track
 	mkCorner(knob, 10)
 	mkStroke(knob, COLORS.green, 2)
 
-	local obj = { Value = value, Name = name }
+	local obj = { Value = value, Name = name, Set = nil }
 
 	function obj:Set(v)
 		v = math.clamp(v, min, max)
 		v = math.floor((v / step) + 0.5) * step
 		obj.Value = v
-		local ratio = (v - min) / (max - min)
+		local ratio = (max == min) and 0 or (v - min) / (max - min)
 		fill.Size = UDim2.new(0, (W - 10) * ratio, 0, 10)
 		knob.Position = UDim2.new(0, (W - 10) * ratio - 10, 0, -5)
-		lbl.Text = name .. ": " .. tostring(math.floor(v * 100) / 100)
+		local shown = math.floor(v * 100 + 0.5) / 100
+		lbl.Text = name .. ": " .. tostring(shown)
 		onChange(v)
 	end
 
-	function obj:SetFromX(x)
+	local function setFromX(x)
 		local ratio = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
-		self:Set(min + ratio * (max - min))
+		obj:Set(min + ratio * (max - min))
 	end
 
 	local dragging = false
 	track.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			dragging = true
-			obj:SetFromX(input.Position.X)
+			setFromX(input.Position.X)
 		end
 	end)
 	knob.InputBegan:Connect(function(input)
@@ -185,7 +202,7 @@ local function mkSlider(parent, name, min, max, value, step, onChange)
 	end)
 	UIS.InputChanged:Connect(function(input)
 		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-			obj:SetFromX(input.Position.X)
+			setFromX(input.Position.X)
 		end
 	end)
 	UIS.InputEnded:Connect(function(input)
@@ -199,105 +216,170 @@ local function mkSlider(parent, name, min, max, value, step, onChange)
 end
 
 --------------------------------------------------
--- DETECCION PVP (heuristica: valores/atributos del jugador)
+-- UTILIDADES DE JUGADOR / TEAM CHECK
 --------------------------------------------------
-local function getPvP(p)
-	local roots = { p, p.Character, p:FindFirstChildOfClass("Backpack") }
-	for _, root in ipairs(roots) do
-		if root then
-			for _, o in ipairs(root:GetDescendants()) do
-				local n = o.Name:lower()
-				if (n == "pvp" or n == "pvpmode" or n == "pvpactive" or n == "safe" or n == "combat") then
-					local v = o:IsA("ValueBase") and o.Value or nil
-					if v ~= nil then
-						if n == "safe" then return v and "OFF" or "ON" end
-						return v and "ON" or "OFF"
-					end
-				end
-			end
-		end
+local function isTeammate(p)
+	if not Config.TeamCheck then return false end
+	if player.Team and p.Team then
+		return player.Team == p.Team
 	end
-	for _, key in ipairs({ "Pvp", "PvP", "Safe", "Combat" }) do
-		local a = p:GetAttribute(key) or (p.Character and p.Character:GetAttribute(key))
-		if a ~= nil then
-			if key == "Safe" then return a and "OFF" or "ON" end
-			return a and "ON" or "OFF"
-		end
-	end
-	return "?"
+	return false
+end
+
+local function getCharData(p)
+	local char = p.Character
+	if not char then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+	if not hum or not root or hum.Health <= 0 then return nil end
+	return char, hum, root
 end
 
 --------------------------------------------------
--- ESP (opciones independientes)
+-- ESP
 --------------------------------------------------
-local esp = {}
+local espObjects = {}
+
 local function clearESP(p)
-	local e = esp[p]
-	if e then
-		pcall(function() e.gui:Destroy() end)
-		esp[p] = nil
+	local o = espObjects[p]
+	if not o then return end
+	pcall(function() if o.gui then o.gui:Destroy() end end)
+	pcall(function() if o.box then o.box:Remove() end end)
+	pcall(function() if o.tracer then o.tracer:Remove() end end)
+	espObjects[p] = nil
+end
+
+local function clearAllESP()
+	for p, _ in pairs(espObjects) do
+		clearESP(p)
 	end
+end
+
+local function newDrawing(className)
+	local ok, obj = pcall(function() return Drawing.new(className) end)
+	if ok then return obj end
+	return nil
 end
 
 local function ensureESP(p)
-	if esp[p] then return esp[p] end
+	if espObjects[p] then return espObjects[p] end
 	local char = p.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-	if not root then return nil end
+	if not char then return nil end
 
-	local bg = Instance.new("BillboardGui")
-	bg.Name = "TinESP"
-	bg.Adornee = root
-	bg.Size = UDim2.new(0, 190, 0, 78)
-	bg.StudsOffset = Vector3.new(0, 2.6, 0)
-	bg.AlwaysOnTop = true
-	bg.Parent = char
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "TinESP"
+	gui.Size = UDim2.new(0, 220, 0, 40)
+	gui.StudsOffset = Vector3.new(0, 3.2, 0)
+	gui.AlwaysOnTop = true
+	gui.Parent = playerGui
 
-	local nl = Instance.new("TextLabel")
-	nl.Size = UDim2.new(1, 0, 0, 24)
-	nl.Position = UDim2.new(0, 0, 0, 0)
-	nl.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-	nl.BackgroundTransparency = 0.35
-	nl.TextColor3 = COLORS.green
-	nl.Font = Enum.Font.GothamBold
-	nl.TextSize = Config.ESPSize
-	nl.Parent = bg
-	mkCorner(nl, 4)
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.TextColor3 = COLORS.green
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 14
+	label.TextStrokeTransparency = 0.2
+	label.Text = ""
+	label.Parent = gui
 
-	local hl = nl:Clone()
-	hl.Position = UDim2.new(0, 0, 0, 26)
-	hl.TextColor3 = Color3.fromRGB(255, 120, 120)
-	hl.Parent = bg
+	espObjects[p] = {
+		gui = gui,
+		label = label,
+		box = newDrawing("Square"),
+		tracer = newDrawing("Line"),
+	}
+	local o = espObjects[p]
+	if o.box then
+		o.box.Thickness = 1
+		o.box.Filled = false
+		o.box.Color = COLORS.green
+		o.box.Visible = false
+	end
+	if o.tracer then
+		o.tracer.Thickness = 1
+		o.tracer.Color = COLORS.green
+		o.tracer.Visible = false
+	end
+	return o
+end
 
-	local pl = nl:Clone()
-	pl.Position = UDim2.new(0, 0, 0, 52)
-	pl.TextColor3 = Color3.fromRGB(255, 220, 90)
-	pl.Parent = bg
-
-	esp[p] = { gui = bg, name = nl, health = hl, pvp = pl }
-	return esp[p]
+local function hideESPObject(o)
+	if not o then return end
+	if o.gui then o.gui.Enabled = false end
+	if o.box then o.box.Visible = false end
+	if o.tracer then o.tracer.Visible = false end
 end
 
 local function updateESP()
-	local anyOn = Config.ESPNames or Config.ESPHealth or Config.ESPPvP
+	local cam = Workspace.CurrentCamera
+	local anyOn = Config.ESPPlayer or Config.ESPName or Config.ESPDistance or Config.ESPBox or Config.ESPTracer
+	if not anyOn or not cam then
+		for _, o in pairs(espObjects) do hideESPObject(o) end
+		return
+	end
+
+	local vp = cam.ViewportSize
+	local bottom = Vector2.new(vp.X / 2, vp.Y)
+
 	for _, p in ipairs(Players:GetPlayers()) do
-		if p == player or not anyOn or not p.Character then
+		if p == player then
 			clearESP(p)
 		else
-			local e = ensureESP(p)
-			if e then
-				local hum = p.Character:FindFirstChildOfClass("Humanoid")
-				e.name.Visible = Config.ESPNames
-				e.health.Visible = Config.ESPHealth
-				e.pvp.Visible = Config.ESPPvP
-				if Config.ESPNames then e.name.Text = p.Name end
-				if Config.ESPHealth and hum then
-					e.health.Text = "HP: " .. math.floor(hum.Health) .. " / " .. math.floor(hum.MaxHealth)
+			local char, hum, root = getCharData(p)
+			if not char or isTeammate(p) then
+				if espObjects[p] then hideESPObject(espObjects[p]) end
+			else
+				local o = ensureESP(p)
+				if o then
+					o.gui.Adornee = root
+					local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+					local dist = myRoot and (root.Position - myRoot.Position).Magnitude or 0
+					local sp, onScreen = cam:WorldToViewportPoint(root.Position)
+
+					-- Texto (Player/Name/Distance)
+					local showText = (Config.ESPPlayer or Config.ESPName or Config.ESPDistance) and onScreen and sp.Z > 0
+					o.gui.Enabled = showText
+					if showText then
+						local parts = {}
+						if Config.ESPName or Config.ESPPlayer then table.insert(parts, p.Name) end
+						if Config.ESPDistance then table.insert(parts, string.format("[%dm]", math.floor(dist))) end
+						o.label.Text = table.concat(parts, " ")
+					end
+
+					-- Box ESP
+					if o.box then
+						if Config.ESPBox and onScreen and sp.Z > 0 then
+							local head = char:FindFirstChild("Head")
+							local topPos = head and head.Position + Vector3.new(0, 0.5, 0) or (root.Position + Vector3.new(0, 2.5, 0))
+							local legPos = root.Position - Vector3.new(0, 3, 0)
+							local top2d, topOn = cam:WorldToViewportPoint(topPos)
+							local leg2d, legOn = cam:WorldToViewportPoint(legPos)
+							if topOn or legOn then
+								local h = math.abs(top2d.Y - leg2d.Y)
+								local w = h * 0.6
+								o.box.Size = Vector2.new(w, h)
+								o.box.Position = Vector2.new(sp.X - w / 2, sp.Y - h / 2)
+								o.box.Visible = true
+							else
+								o.box.Visible = false
+							end
+						else
+							o.box.Visible = false
+						end
+					end
+
+					-- Tracer ESP
+					if o.tracer then
+						if Config.ESPTracer and onScreen and sp.Z > 0 then
+							o.tracer.From = bottom
+							o.tracer.To = Vector2.new(sp.X, sp.Y)
+							o.tracer.Visible = true
+						else
+							o.tracer.Visible = false
+						end
+					end
 				end
-				if Config.ESPPvP then e.pvp.Text = "PVP: " .. getPvP(p) end
-				e.name.TextSize = Config.ESPSize
-				e.health.TextSize = Config.ESPSize
-				e.pvp.TextSize = Config.ESPSize
 			end
 		end
 	end
@@ -308,27 +390,25 @@ Players.PlayerRemoving:Connect(function(p) clearESP(p) end)
 --------------------------------------------------
 -- AIMBOT (solo jugadores, dentro del circulo FOV y del rango)
 --------------------------------------------------
--- Funciones que exponen los executors (Xeno, Synapse, etc.)
-local mousemoverel     = mousemoverel or mousemove or nil
-local mousemoveabs     = mousemoveabs or nil
-local mouse1click      = mouse1click or nil
+local mousemoverel      = mousemoverel or mousemove or nil
+local mousemoveabs      = mousemoveabs or nil
+local mouse1click       = mouse1click or nil
 local firetouchinterest = firetouchinterest or nil
 
 local function getTarget()
-	local cam = workspace.CurrentCamera
+	local cam = Workspace.CurrentCamera
 	if not cam then return nil end
 	local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
 	local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 	local best, bestScore = nil, math.huge
 
 	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= player and p.Character then
-			local hum = p.Character:FindFirstChildOfClass("Humanoid")
-			local root = p.Character:FindFirstChild("HumanoidRootPart")
-			if hum and root and hum.Health > 0 then
+		if p ~= player and not isTeammate(p) then
+			local char, hum, root = getCharData(p)
+			if char and hum and root then
 				local dist = myRoot and (root.Position - myRoot.Position).Magnitude or 0
 				if dist <= Config.Range then
-					local sp, onScreen = cam:WorldToScreenPoint(root.Position)
+					local sp, onScreen = cam:WorldToViewportPoint(root.Position)
 					if onScreen and sp.Z > 0 then
 						local screen = Vector2.new(sp.X, sp.Y)
 						local d = (screen - center).Magnitude
@@ -344,49 +424,9 @@ local function getTarget()
 	return best
 end
 
-RS.RenderStepped:Connect(function()
-	if not Config.Aimbot then
-		currentTarget = nil
-		return
-	end
-	currentTarget = getTarget()
-	if not currentTarget then return end
-
-	local cam = workspace.CurrentCamera
-	local tp = currentTarget.root.Position
-	local myChar = player.Character
-	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-
-	-- 1) Mover el mouse real: Blox Fruits rota la camara con el mouse
-	if Config.UseMouse and cam and currentTarget.screen then
-		pcall(function()
-			if mousemoveabs then
-				mousemoveabs(currentTarget.screen.X, currentTarget.screen.Y)
-			elseif mousemoverel then
-				local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-				local delta = currentTarget.screen - center
-				mousemoverel(delta.X, delta.Y)
-			end
-		end)
-	end
-
-	-- 2) Rotar el personaje hacia el torso (para que las habilidades salgan hacia el)
-	if myRoot then
-		local flat = Vector3.new(tp.X, myRoot.Position.Y, tp.Z)
-		pcall(function()
-			myRoot.CFrame = CFrame.lookAt(myRoot.Position, flat)
-		end)
-	end
-
-	-- 3) Fallback: forzar la camara solo si no hay mouse disponible
-	if (not Config.UseMouse or (not mousemoveabs and not mousemoverel)) and cam then
-		pcall(function()
-			cam.CFrame = CFrame.lookAt(cam.CFrame.Position, tp)
-		end)
-	end
-end)
-
--- Circulo visual del FOV
+--------------------------------------------------
+-- FOV CIRCLE
+--------------------------------------------------
 local fovCircle = Instance.new("Frame")
 fovCircle.Name = "TinFOV"
 fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -405,12 +445,12 @@ local function refreshFOV()
 end
 
 --------------------------------------------------
--- M1 / ATAQUE (multi-metodo para asegurar el golpe)
+-- ATAQUE M1
 --------------------------------------------------
 local function fireCombatRemote()
 	if not Config.FireRemote or not currentTarget then return end
-	local RSvc = game:GetService("ReplicatedStorage")
-	for _, obj in ipairs(RSvc:GetDescendants()) do
+	local rsvc = game:GetService("ReplicatedStorage")
+	for _, obj in ipairs(rsvc:GetDescendants()) do
 		if obj:IsA("RemoteEvent") then
 			local n = obj.Name:lower()
 			if n:find("combat") or n:find("attack") or n:find("melee") or n:find("m1") then
@@ -421,35 +461,72 @@ local function fireCombatRemote()
 end
 
 local function m1Click()
-	local cam = workspace.CurrentCamera
+	local cam = Workspace.CurrentCamera
 	local cx = cam and cam.ViewportSize.X / 2 or 500
 	local cy = cam and cam.ViewportSize.Y / 2 or 300
 
-	-- 1) mouse1click: dispara el input real del juego
-	if mouse1click then
-		pcall(mouse1click)
-	end
+	if mouse1click then pcall(mouse1click) end
 
-	-- 2) firetouchinterest: simula el contacto fisico del golpe
 	if Config.AttackTouch and firetouchinterest and currentTarget then
 		pcall(function()
 			local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-			if myRoot then
+			if myRoot and currentTarget.root then
 				firetouchinterest(myRoot, currentTarget.root, 0)
 				firetouchinterest(myRoot, currentTarget.root, 1)
 			end
 		end)
 	end
 
-	-- 3) Remotos de combate de Blox Fruits
 	fireCombatRemote()
 
-	-- 4) VIM como ultimo recurso
 	pcall(function()
 		VIM:SendMouseButtonEvent(cx, cy, 0, true, game, false)
 		VIM:SendMouseButtonEvent(cx, cy, 0, false, game, false)
 	end)
 end
+
+--------------------------------------------------
+-- LOOPS
+--------------------------------------------------
+RS.RenderStepped:Connect(function()
+	if not Config.Aimbot then
+		currentTarget = nil
+		refreshFOV()
+		return
+	end
+	currentTarget = getTarget()
+	refreshFOV()
+	if not currentTarget then return end
+
+	local cam = Workspace.CurrentCamera
+	local tp = currentTarget.root.Position
+	local myRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+
+	if Config.UseMouse and cam and currentTarget.screen then
+		pcall(function()
+			if mousemoveabs then
+				mousemoveabs(currentTarget.screen.X, currentTarget.screen.Y)
+			elseif mousemoverel then
+				local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+				local delta = currentTarget.screen - center
+				mousemoverel(delta.X, delta.Y)
+			end
+		end)
+	end
+
+	if myRoot then
+		pcall(function()
+			local flat = Vector3.new(tp.X, myRoot.Position.Y, tp.Z)
+			myRoot.CFrame = CFrame.lookAt(myRoot.Position, flat)
+		end)
+	end
+
+	if (not Config.UseMouse or (not mousemoveabs and not mousemoverel)) and cam then
+		pcall(function()
+			cam.CFrame = CFrame.lookAt(cam.CFrame.Position, tp)
+		end)
+	end
+end)
 
 task.spawn(function()
 	while true do
@@ -462,35 +539,45 @@ end)
 
 task.spawn(function()
 	while true do
-		task.wait(0.3)
+		task.wait(0.25)
 		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 		if hum and Config.WalkEnabled then
 			hum.WalkSpeed = Config.WalkSpeed
-		end
-		if hum and Config.AutoJump then
-			hum.JumpPower = Config.JumpPower
-			hum.Jump = true
-			task.wait(Config.JumpInterval)
 		end
 	end
 end)
 
 task.spawn(function()
 	while true do
-		task.wait(0.25)
-		updateESP()
-		refreshFOV()
+		if Config.AutoJump then
+			local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.JumpPower = Config.JumpPower
+				hum.Jump = true
+			end
+			task.wait(math.max(0.2, Config.JumpInterval))
+		else
+			task.wait(0.2)
+		end
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		pcall(updateESP)
 	end
 end)
 
 --------------------------------------------------
--- MACRO (grabar y repetir teclas / habilidades / clics)
+-- MACRO
 --------------------------------------------------
 local macro = {
 	recording = false,
 	playing   = false,
 	events    = {},
 	start     = 0,
+	loop      = Config.MacroLoop,
 }
 
 local function macroLog(text)
@@ -520,9 +607,7 @@ local function playEvent(ev)
 	else
 		local k = Enum.KeyCode[ev.key]
 		if k then
-			pcall(function()
-				VIM:SendKeyEvent(ev.kind == "down", k, false, game)
-			end)
+			pcall(function() VIM:SendKeyEvent(ev.kind == "down", k, false, game) end)
 		end
 	end
 end
@@ -535,18 +620,14 @@ task.spawn(function()
 			local cycleStart = tick()
 			for _, ev in ipairs(macro.events) do
 				if not macro.playing then break end
-				local elapsed = tick() - cycleStart
-				local waitFor = ev.t - elapsed
+				local waitFor = ev.t - (tick() - cycleStart)
 				if waitFor > 0 then task.wait(waitFor) end
 				playEvent(ev)
 			end
-			if macro.loop then
-				-- continua
-			else
+			if not Config.MacroLoop then
 				macro.playing = false
-				if ui.macroPlay then
-					ui.macroPlay.Text = "REPETIR: OFF"
-					ui.macroPlay.BackgroundColor3 = COLORS.red
+				if ui.macroPlay and ui.macroPlay.RefreshPlay then
+					ui.macroPlay:RefreshPlay(false)
 				end
 			end
 		end
@@ -582,10 +663,13 @@ local function loadConfig()
 		miscLog("Error: " .. tostring(err))
 		return
 	end
-	for _, s in pairs(sliders) do s:Set(Config[s.Key]) end
-	if ui.toggles then
-		for _, t in ipairs(ui.toggles) do t:Refresh() end
+	for _, s in ipairs(sliders) do
+		if s.Key and Config[s.Key] ~= nil then s:Set(Config[s.Key]) end
 	end
+	for _, t in ipairs(ui.toggles or {}) do
+		if t.Refresh then t:Refresh() end
+	end
+	macro.loop = Config.MacroLoop
 	refreshFOV()
 	miscLog("Configuracion cargada")
 end
@@ -597,20 +681,17 @@ local gui = Instance.new("ScreenGui")
 gui.Name = "TinBloxHub"
 gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = playerGui
-
-local circle = mkBtn(gui, "T", UDim2.new(0, 62, 0, 62), UDim2.new(0, 22, 0.42, 0), COLORS.green2, nil)
-circle.TextSize = 26
-local cc = Instance.new("UICorner"); cc.CornerRadius = UDim.new(1, 0); cc.Parent = circle
-mkStroke(circle, COLORS.green, 2)
-circle.Visible = false
+pcall(function() gui.Parent = game:GetService("CoreGui") end)
+if not gui.Parent then gui.Parent = playerGui end
 
 local main = Instance.new("Frame")
+main.Name = "Main"
 main.Size = UDim2.new(0, 580, 0, 500)
 main.Position = UDim2.new(0.5, -290, 0.5, -250)
 main.BackgroundColor3 = COLORS.bg
 main.BackgroundTransparency = 0.18
 main.BorderSizePixel = 0
+main.Active = true
 main.Parent = gui
 mkCorner(main, 14)
 mkStroke(main, COLORS.green2, 2)
@@ -619,23 +700,23 @@ local top = Instance.new("Frame")
 top.Size = UDim2.new(1, 0, 0, 46)
 top.BackgroundColor3 = COLORS.top
 top.BackgroundTransparency = 0.25
+top.BorderSizePixel = 0
+top.Active = true
 top.Parent = main
 mkCorner(top, 14)
 
 mkLabel(top, "TIN BLOX HUB", UDim2.new(0, 260, 0, 30), UDim2.new(0, 16, 0, 8), 19, COLORS.green, Enum.Font.GothamBold)
 mkLabel(top, "Blox Fruits", UDim2.new(0, 130, 0, 24), UDim2.new(0, 190, 0, 12), 12, COLORS.muted)
 
-local minBtn = mkBtn(top, "-", UDim2.new(0, 32, 0, 30), UDim2.new(1, -76, 0, 8), COLORS.btn, nil)
+local minBtn = mkBtn(top, "-", UDim2.new(0, 32, 0, 30), UDim2.new(1, -40, 0, 8), COLORS.btn, nil)
 minBtn.TextSize = 20
-local maxBtn = mkBtn(top, "+", UDim2.new(0, 32, 0, 30), UDim2.new(1, -40, 0, 8), COLORS.btn, nil)
-maxBtn.TextSize = 20
-maxBtn.Visible = false
 
 local side = Instance.new("Frame")
 side.Size = UDim2.new(0, 140, 1, -46)
 side.Position = UDim2.new(0, 0, 0, 46)
 side.BackgroundColor3 = COLORS.side
 side.BackgroundTransparency = 0.3
+side.BorderSizePixel = 0
 side.Parent = main
 
 local contentHost = Instance.new("Frame")
@@ -676,15 +757,14 @@ end
 selectTab(1)
 
 ui.toggles = {}
-local function addToggle(parent, text, pos, key)
-	local b = mkToggle(parent, text, UDim2.new(0, 400, 0, 38), pos, Config[key], function(v)
+local function addToggle(parent, text, pos, key, afterChange)
+	local b, setVal = mkToggle(parent, text, UDim2.new(0, 390, 0, 38), pos, Config[key], function(v)
 		Config[key] = v
+		if afterChange then afterChange(v) end
 		refreshFOV()
 	end)
 	b.Refresh = function()
-		Config[key] = Config[key] and true or false
-		b.Text = text .. ": " .. (Config[key] and "ON" or "OFF")
-		b.BackgroundColor3 = Config[key] and COLORS.green2 or COLORS.red
+		setVal(Config[key])
 	end
 	table.insert(ui.toggles, b)
 	return b
@@ -693,6 +773,7 @@ end
 local function addSlider(parent, name, pos, min, max, value, step, key)
 	local s = mkSlider(parent, name, min, max, value, step, function(v)
 		Config[key] = v
+		if key == "FOV" then refreshFOV() end
 	end)
 	s.Position = pos
 	s.Key = key
@@ -713,9 +794,8 @@ addToggle(t1, "REMOTO COMBAT", UDim2.new(0, 14, 0, 234), "FireRemote")
 addSlider(t1, "FOV (pixeles)", UDim2.new(0, 14, 0, 282), 40, 400, Config.FOV, 5, "FOV")
 addSlider(t1, "RANGO (studs)", UDim2.new(0, 14, 0, 350), 20, 500, Config.Range, 10, "Range")
 addSlider(t1, "GOLPES/SEG M1", UDim2.new(0, 14, 0, 418), 2, 50, Config.AttackSpeed, 1, "AttackSpeed")
-mkLabel(t1, "Solo jugadores. NPCs ignorados. Apunta al torso", UDim2.new(0, 400, 0, 40), UDim2.new(0, 14, 0, 500), 12, COLORS.muted)
-mkLabel(t1, "dentro del circulo y del rango.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 524), 12, COLORS.muted)
-mkLabel(t1, "Si el aimbot no mueve la camara, prueba MOUSE REAL OFF.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 550), 12, COLORS.muted)
+mkLabel(t1, "Solo jugadores. NPCs ignorados. Apunta al torso dentro del FOV.", UDim2.new(0, 390, 0, 20), UDim2.new(0, 14, 0, 500), 12, COLORS.muted)
+mkLabel(t1, "Si el aim no mueve camara, prueba MOUSE REAL OFF.", UDim2.new(0, 390, 0, 20), UDim2.new(0, 14, 0, 524), 12, COLORS.muted)
 
 --------------------------------------------------
 -- TAB 2: MOVIMIENTO
@@ -737,13 +817,17 @@ end)
 
 mkBtn(t2, "RESET VELOCIDAD", UDim2.new(0, 190, 0, 44), UDim2.new(0, 214, 0, 326), COLORS.btn, function()
 	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-	if hum then hum.WalkSpeed = 16; hum.JumpPower = 50 end
+	if hum then
+		hum.WalkSpeed = 16
+		hum.JumpPower = 50
+	end
 end)
 
 --------------------------------------------------
 -- TAB 3: MACRO
 --------------------------------------------------
 local t3 = tabFrames[3]
+
 mkBtn(t3, "GRABAR", UDim2.new(0, 190, 0, 44), UDim2.new(0, 14, 0, 16), COLORS.green2, function()
 	macro.events = {}
 	macro.recording = true
@@ -753,106 +837,147 @@ end)
 
 mkBtn(t3, "PARAR", UDim2.new(0, 190, 0, 44), UDim2.new(0, 214, 0, 16), COLORS.red, function()
 	macro.recording = false
-	macroLog("Grabacion detenida: " .. #macro.events .. " eventos")
+	macroLog("Grabacion detenida: " .. tostring(#macro.events) .. " eventos")
 end)
 
 ui.macroPlay = mkBtn(t3, "REPETIR: OFF", UDim2.new(0, 190, 0, 44), UDim2.new(0, 14, 0, 74), COLORS.red, nil)
+function ui.macroPlay:RefreshPlay(on)
+	self.Text = "REPETIR: " .. (on and "ON" or "OFF")
+	self.BackgroundColor3 = on and COLORS.green2 or COLORS.red
+end
 ui.macroPlay.MouseButton1Click:Connect(function()
 	macro.playing = not macro.playing
-	ui.macroPlay.Text = "REPETIR: " .. (macro.playing and "ON" or "OFF")
-	ui.macroPlay.BackgroundColor3 = macro.playing and COLORS.green2 or COLORS.red
+	ui.macroPlay:RefreshPlay(macro.playing)
 end)
 
-ui.macroLoop = mkToggle(t3, "CICLO", UDim2.new(0, 190, 0, 38), UDim2.new(0, 214, 0, 74), Config.MacroLoop, function(v)
-	Config.MacroLoop = v
+addToggle(t3, "CICLO", UDim2.new(0, 190, 0, 38), UDim2.new(0, 214, 0, 74), "MacroLoop", function(v)
 	macro.loop = v
 end)
-macro.loop = Config.MacroLoop
 
 mkBtn(t3, "LIMPIAR", UDim2.new(0, 190, 0, 44), UDim2.new(0, 14, 0, 132), COLORS.btn, function()
 	macro.events = {}
 	macro.playing = false
-	ui.macroPlay.Text = "REPETIR: OFF"
-	ui.macroPlay.BackgroundColor3 = COLORS.red
+	ui.macroPlay:RefreshPlay(false)
 	macroLog("Macro limpia")
 end)
 
-ui.macroStatus = mkLabel(t3, "Sin grabacion", UDim2.new(0, 400, 0, 44), UDim2.new(0, 14, 0, 196), 14, COLORS.green)
-mkLabel(t3, "Graba teclas (1-9, Z, X, C...), movimiento W/A/S/D", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 250), 12, COLORS.muted)
-mkLabel(t3, "y clics M1; luego REPETIR para ejecutar la secuencia.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 276), 12, COLORS.muted)
+ui.macroStatus = mkLabel(t3, "Sin grabacion", UDim2.new(0, 390, 0, 44), UDim2.new(0, 14, 0, 196), 14, COLORS.green)
+mkLabel(t3, "Graba teclas, movimiento y clics M1.", UDim2.new(0, 390, 0, 22), UDim2.new(0, 14, 0, 250), 12, COLORS.muted)
+mkLabel(t3, "REPETIR ejecuta la secuencia guardada.", UDim2.new(0, 390, 0, 22), UDim2.new(0, 14, 0, 276), 12, COLORS.muted)
 
 --------------------------------------------------
--- TAB 4: ESP (opciones separadas)
+-- TAB 4: ESP
 --------------------------------------------------
 local t4 = tabFrames[4]
-addToggle(t4, "ESP NOMBRE", UDim2.new(0, 14, 0, 16), "ESPNames")
-addToggle(t4, "ESP VIDA", UDim2.new(0, 14, 0, 66), "ESPHealth")
-addToggle(t4, "ESP PVP", UDim2.new(0, 14, 0, 116), "ESPPvP")
-addSlider(t4, "TAMANO TEXTO", UDim2.new(0, 14, 0, 170), 10, 28, Config.ESPSize, 1, "ESPSize")
-mkLabel(t4, "Cada ESP funciona por separado.", UDim2.new(0, 400, 0, 24), UDim2.new(0, 14, 0, 250), 12, COLORS.muted)
-mkLabel(t4, "PVP se lee de valores/atributos del jugador;", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 276), 12, COLORS.muted)
-mkLabel(t4, "si el juego no lo expone muestra '?'.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 300), 12, COLORS.muted)
+addToggle(t4, "PLAYER ESP", UDim2.new(0, 14, 0, 16), "ESPPlayer")
+addToggle(t4, "NAME ESP", UDim2.new(0, 14, 0, 66), "ESPName")
+addToggle(t4, "DISTANCE ESP", UDim2.new(0, 14, 0, 116), "ESPDistance")
+addToggle(t4, "BOX ESP", UDim2.new(0, 14, 0, 166), "ESPBox")
+addToggle(t4, "TRACER ESP", UDim2.new(0, 14, 0, 216), "ESPTracer")
+addToggle(t4, "TEAM CHECK", UDim2.new(0, 14, 0, 266), "TeamCheck", function()
+	clearAllESP()
+end)
+
+mkLabel(t4, "Cada opcion es independiente.", UDim2.new(0, 390, 0, 22), UDim2.new(0, 14, 0, 320), 12, COLORS.muted)
+mkLabel(t4, "Team Check oculta a los de tu mismo equipo.", UDim2.new(0, 390, 0, 22), UDim2.new(0, 14, 0, 346), 12, COLORS.muted)
+mkLabel(t4, "Box/Tracer requieren Drawing (executor).", UDim2.new(0, 390, 0, 22), UDim2.new(0, 14, 0, 372), 12, COLORS.muted)
 
 --------------------------------------------------
 -- TAB 5: MISC
 --------------------------------------------------
 local t5 = tabFrames[5]
-mkBtn(t5, "GUARDAR CONFIG", UDim2.new(0, 400, 0, 48), UDim2.new(0, 14, 0, 18), COLORS.green2, saveConfig)
-mkBtn(t5, "CARGAR CONFIG", UDim2.new(0, 400, 0, 48), UDim2.new(0, 14, 0, 80), COLORS.btn, loadConfig)
-mkBtn(t5, "VALORES POR DEFECTO", UDim2.new(0, 400, 0, 48), UDim2.new(0, 14, 0, 142), COLORS.btn, function()
-	Config.FOV = 140; Config.Range = 200; Config.AttackSpeed = 12; Config.WalkSpeed = 16
-	Config.JumpPower = 60; Config.JumpInterval = 1.0; Config.ESPSize = 14
-	for _, s in pairs(sliders) do s:Set(Config[s.Key]) end
-	for _, tg in ipairs(ui.toggles) do tg:Refresh() end
+mkBtn(t5, "GUARDAR CONFIG", UDim2.new(0, 390, 0, 48), UDim2.new(0, 14, 0, 18), COLORS.green2, saveConfig)
+mkBtn(t5, "CARGAR CONFIG", UDim2.new(0, 390, 0, 48), UDim2.new(0, 14, 0, 80), COLORS.btn, loadConfig)
+mkBtn(t5, "VALORES POR DEFECTO", UDim2.new(0, 390, 0, 48), UDim2.new(0, 14, 0, 142), COLORS.btn, function()
+	Config.Aimbot = false
+	Config.ShowFOV = true
+	Config.FOV = 140
+	Config.Range = 200
+	Config.AutoM1 = false
+	Config.AttackSpeed = 12
+	Config.UseMouse = true
+	Config.AttackTouch = true
+	Config.FireRemote = true
+	Config.WalkEnabled = false
+	Config.WalkSpeed = 16
+	Config.JumpPower = 60
+	Config.AutoJump = false
+	Config.JumpInterval = 1.0
+	Config.ESPPlayer = false
+	Config.ESPName = false
+	Config.ESPDistance = false
+	Config.ESPBox = false
+	Config.ESPTracer = false
+	Config.TeamCheck = true
+	Config.MacroLoop = true
+	for _, s in ipairs(sliders) do if s.Key then s:Set(Config[s.Key]) end end
+	for _, t in ipairs(ui.toggles) do if t.Refresh then t:Refresh() end end
+	macro.loop = Config.MacroLoop
 	refreshFOV()
 	miscLog("Valores por defecto aplicados")
 end)
-ui.miscStatus = mkLabel(t5, "Sin guardar", UDim2.new(0, 400, 0, 26), UDim2.new(0, 14, 0, 210), 13, COLORS.green)
-mkLabel(t5, "Archivo: " .. CONFIG_FILE, UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 244), 12, COLORS.muted)
-mkLabel(t5, "Requiere que el executor soporte writefile/readfile.", UDim2.new(0, 400, 0, 22), UDim2.new(0, 14, 0, 270), 12, COLORS.muted)
+
+mkBtn(t5, "REINICIAR ESP", UDim2.new(0, 390, 0, 48), UDim2.new(0, 14, 0, 204), COLORS.btn, function()
+	clearAllESP()
+	miscLog("ESP reiniciado")
+end)
+
+ui.miscStatus = mkLabel(t5, "Sin guardar", UDim2.new(0, 390, 0, 26), UDim2.new(0, 14, 0, 270), 13, COLORS.green)
+mkLabel(t5, "Archivo: " .. CONFIG_FILE, UDim2.new(0, 390, 0, 22), UDim2.new(0, 14, 0, 300), 12, COLORS.muted)
+mkLabel(t5, "Guardar/Cargar requiere writefile/readfile/isfile.", UDim2.new(0, 390, 0, 22), UDim2.new(0, 14, 0, 326), 12, COLORS.muted)
 
 --------------------------------------------------
 -- MINIMIZAR / REABRIR / ARRASTRE
 --------------------------------------------------
-local FULL_SIZE = UDim2.new(0, 580, 0, 500)
-local MIN_SIZE  = UDim2.new(0, 580, 0, 46)
-local function setUIVisible(v)
-	main.Visible = v
-	circle.Visible = not v
-end
-minBtn.MouseButton1Click:Connect(function()
-	main.Size = MIN_SIZE
-	contentHost.Visible = false
-	side.Visible = false
-	minBtn.Visible = false
-	maxBtn.Visible = true
-end)
-maxBtn.MouseButton1Click:Connect(function()
-	main.Size = FULL_SIZE
-	contentHost.Visible = true
-	side.Visible = true
-	minBtn.Visible = true
-	maxBtn.Visible = false
-end)
-circle.MouseButton1Click:Connect(function() setUIVisible(true) end)
+local circle = mkBtn(gui, "T", UDim2.new(0, 56, 0, 56), UDim2.new(0, 20, 0.45, 0), COLORS.green2, nil)
+circle.TextSize = 24
+circle.Visible = false
+local cc = Instance.new("UICorner"); cc.CornerRadius = UDim.new(1, 0); cc.Parent = circle
+mkStroke(circle, COLORS.green, 2)
 
-local dragging, dragStart, startPos
+local function minimizeUI()
+	main.Visible = false
+	circle.Visible = true
+end
+local function restoreUI()
+	main.Visible = true
+	circle.Visible = false
+end
+
+minBtn.MouseButton1Click:Connect(minimizeUI)
+circle.MouseButton1Click:Connect(restoreUI)
+
+local dragging, dragInput, dragStart, startPos
+local function updateDrag(input)
+	local delta = input.Position - dragStart
+	main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
 top.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 		dragging = true
 		dragStart = input.Position
 		startPos = main.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
 	end
-end)
-UIS.InputChanged:Connect(function(input)
-	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-		local d = input.Position - dragStart
-		main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-	end
-end)
-UIS.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 end)
 
+top.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+
+UIS.InputChanged:Connect(function(input)
+	if dragging and input == dragInput then
+		updateDrag(input)
+	end
+end)
+
+--------------------------------------------------
+-- INICIO
+--------------------------------------------------
 refreshFOV()
-print("TIN BLOX HUB cargado.")
+print("[TIN BLOX HUB] Cargado. Tabs: MAIN/MOVIMIENTO/MACRO/ESP/MISC")
